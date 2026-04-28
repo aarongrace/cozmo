@@ -1,5 +1,6 @@
 import argparse
 import math
+import sys
 import time
 import tkinter as tk
 from pathlib import Path
@@ -775,12 +776,17 @@ def parse_args():
 def main():
     args = parse_args()
 
-    with CozmoInterface(test_mode=args.test) as cozmo:
-        root = tk.Tk()
-        app = CozmoGui(root=root, cozmo=cozmo)
-        del app
-        root.mainloop()
+    try:
+        with CozmoInterface(test_mode=args.test) as cozmo:
+            root = tk.Tk()
+            app = CozmoGui(root=root, cozmo=cozmo)
+            del app
+            root.mainloop()
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

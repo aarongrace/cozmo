@@ -54,13 +54,11 @@ class CozmoInterface:
                 raise
             self.connection_error = f"pycozmo exited during connection (code={exc.code})"
             self._ctx = None
-            self.test_mode = True
-            self.cli = ToyClient()
+            raise RuntimeError(self.connection_error) from exc
         except Exception as exc:
             self.connection_error = str(exc)
             self._ctx = None
-            self.test_mode = True
-            self.cli = ToyClient()
+            raise RuntimeError(f"failed to connect to Cozmo: {exc}") from exc
 
     def disconnect(self):
         if self.test_mode:
