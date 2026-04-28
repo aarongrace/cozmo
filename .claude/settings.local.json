@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:pettingzoo.farama.org)",
+      "WebSearch",
+      "WebFetch(domain:bleak.readthedocs.io)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
