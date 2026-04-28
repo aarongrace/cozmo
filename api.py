@@ -49,6 +49,13 @@ class CozmoInterface:
             pycozmo = self._load_pycozmo()
             self._ctx = pycozmo.connect()
             self.cli = self._ctx.__enter__()
+        except SystemExit as exc:
+            if exc.code in (0, None):
+                raise
+            self.connection_error = f"pycozmo exited during connection (code={exc.code})"
+            self._ctx = None
+            self.test_mode = True
+            self.cli = ToyClient()
         except Exception as exc:
             self.connection_error = str(exc)
             self._ctx = None
