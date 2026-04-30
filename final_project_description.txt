@@ -1,0 +1,70 @@
+Final Project: The Cozmo Cube Collector
+tags: final-project cozmo robotics autonomous-systems
+Project Overview
+Welcome to the final project! Your team will design and implement an autonomous retrieval system. Your goal is to navigate an environment with obstacles, locate packages (Cozmo Cubes), and bring them back to a designated Base Station.
+
+Your Cozmo will act like a warehouse robot; it must sense, plan, and act to pick up a desired package and deliver it back to where it belongs.
+
+Logistics
+Item	Details
+Team Size	Groups of 2 or 3 students
+Development	Class time is available for testing, but plan to develop and experiment outside of class
+Environment (Tiers 1–4)	Fixed layout — obstacles stay in the same place each experiment
+Environment (Tier 5)	Randomized — obstacles will be rearranged each run
+Field Surface	Poster board, available during class and in office hours
+The Rules of the Field
+You MAY
+
+Modify your cubes with color, patterns, or markers — as long as the modification is reversible (e.g., taped on, not glued).
+Add visual aids such as AprilTags to obstacles to help your computer vision and object recognition pipeline.
+You MAY NOT
+
+Remove obstacles from the field. You must navigate around them.
+The Base Station
+The base station will be marked with a specific, permanent visual marker (such as an ArUco or AprilTag) so your robot can find its way "home."
+
+The 5-Tier Challenge
+The final project is laid out as five separate challenges. Each increases in difficulty and builds on the previous one.
+
+Tier 1  →  Tier 2  →  Tier 3  →  Tier 4  →  Tier 5
+Manual    Assisted   Auto-Run   Multi-Cube  Random Environment
+Tier 1 — Teleoperation (Manual Control)
+Goal: Complete the full retrieval cycle (Search → Grab → Return) manually with teleoperation.
+Requirement: Implement keyboard controls to drive, tilt the head, and operate the lift.
+Success Criterion: Successfully deliver one cube to the base station.
+Hint
+Tier 2 — Semi-Autonomous Search
+Goal: The robot must find a cube autonomously.
+Requirement: Use proximity sensors or camera data for basic navigation. The robot must stop once it is aligned with a cube.
+Human Assist: You may manually place the cube onto the forklift once the robot arrives.
+Success Criterion: The robot must then return to the base station autonomously.
+Hint
+Tier 3 — The Autonomous Agent
+Goal: Fully autonomous retrieval of one cube.
+Requirement: Use camera feedback to align precisely and execute the "lift" maneuver without any human intervention.
+Tier 4 — The Efficient Gatherer
+Goal: Retrieve 3 cubes sequentially. Once a cube has been picked up, another will be placed in the same spot.
+Requirement: Your Cozmo should remember the location of found cubes and navigate back to that location efficiently — no wandering.
+Tier 5 — Dynamic Navigation (The "Random" Map)
+Goal: Success in an unpredictable environment. Obstacles will be shuffled around. The cozmo must return cube(s) to the base station without colliding with obstacles.
+Requirement: The instructor will move and rotate the obstacles into a randomized layout.
+Success Criterion: Your robot must use its sensors to avoid collisions and find new paths to the cubes and the base station marker.
+Evaluation Rubric
+The project is graded out of 100 points.
+
+Tiers 1–4 account for 90 points — completing all four cleanly earns you a 90 (an A-).
+Tier 5 is worth an additional 10 points as a stretch challenge for teams pushing beyond the core requirements.
+Partial credit will be awarded for each tier if, for instance, the behavior is "basically" correct, but requires a bit of human assistance to put the block on the forklift.
+Each tier has two components:
+
+Check-in (~20% of tier points): A short oral Q&A. The instructor will ask questions about your design, code, and decisions — and may direct any question to any member of the group. Every team member is expected to be able to explain how the system works, not just the part they wrote. Divide the labor however you like, but do not divide the understanding.
+Completion (~80% of tier points): The working demonstration that meets the tier's success criteria. Mostly binary — it works or it doesn't — but reasonable partial credit is available for systems that work most of the time or fail in instructive ways.
+Point Breakdown
+Tier	Description	Check-in	Completion	Total
+Tier 1	Teleoperation	4	17	21
+Tier 2	Semi-Autonomous Search	4	18	22
+Tier 3	The Autonomous Agent	5	18	23
+Tier 4	The Efficient Gatherer	5	19	24
+Tier 5	Dynamic Navigation (stretch)	2	8	10
+Total	20	80	100
+Demo attempts are unlimited. You may re-attempt any tier's completion demo as many times as you want. The only hard deadline is the last day of classes — anything not demoed by then will not be graded.

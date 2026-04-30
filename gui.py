@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 
 from api import CozmoInterface
 from helpers import *
+from marker_search import MarkerSearchController
 from audio import (
     get_audio_status,
     init_audio_controller,
@@ -42,8 +43,9 @@ class CozmoGui:
 
     MODE_TELEOP = "teleop"
     MODE_ROUTINE = "routine"
+    MODE_CUBE_SEARCH = "cube_search"
     MODE_IDLE = "idle"
-    MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_IDLE)
+    MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_CUBE_SEARCH, MODE_IDLE)
 
     CANVAS_SIZE_PX = 500
 
@@ -54,6 +56,7 @@ class CozmoGui:
         self.state = RobotState()
         self.mode = self.MODE_IDLE
         self.routine = None
+        self.cube_search = None
 
         self.last_tick_s = time.perf_counter()
         self.trajectory = []
@@ -74,6 +77,7 @@ class CozmoGui:
         self.status_wheels = tk.StringVar(value="L=0.0 mm/s, R=0.0 mm/s")
         self.status_target = tk.StringVar(value="target=none")
         self.status_routine = tk.StringVar(value="routine=inactive")
+        self.status_cube_search = tk.StringVar(value="cube search=inactive")
         self.status_conn = tk.StringVar(value=self._connection_status_text())
         self.status_audio = tk.StringVar(value="audio: init")
 
@@ -185,6 +189,7 @@ class CozmoGui:
         mode_buttons.columnconfigure(0, weight=1)
         mode_buttons.columnconfigure(1, weight=1)
         mode_buttons.columnconfigure(2, weight=1)
+        mode_buttons.columnconfigure(3, weight=1)
         tk.Button(
             mode_buttons, text="Teleop", command=lambda: self.set_mode(self.MODE_TELEOP), **button_style
         ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
@@ -192,8 +197,11 @@ class CozmoGui:
             mode_buttons, text="Routine", command=lambda: self.set_mode(self.MODE_ROUTINE), **button_style
         ).grid(row=0, column=1, sticky="ew", padx=2)
         tk.Button(
+            mode_buttons, text="Find Cube", command=lambda: self.set_mode(self.MODE_CUBE_SEARCH), **button_style
+        ).grid(row=0, column=2, sticky="ew", padx=2)
+        tk.Button(
             mode_buttons, text="Idle", command=lambda: self.set_mode(self.MODE_IDLE), **button_style
-        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        ).grid(row=0, column=3, sticky="ew", padx=(4, 0))
         row += 1
 
         ttk.Separator(side).grid(row=row, column=0, columnspan=2, sticky="ew", pady=6)
@@ -209,6 +217,10 @@ class CozmoGui:
         row += 1
         ttk.Label(side, textvariable=self.status_routine, font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w")
         ttk.Label(side, textvariable=self.status_conn, font=("Segoe UI", 9)).grid(row=row, column=1, sticky="w")
+        row += 1
+        ttk.Label(side, textvariable=self.status_cube_search, font=("Segoe UI", 9)).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
         row += 1
         ttk.Label(side, textvariable=self.status_audio, font=("Segoe UI", 9)).grid(
             row=row, column=0, columnspan=2, sticky="w"
@@ -373,15 +385,37 @@ class CozmoGui:
         self.mode = mode
         if mode == self.MODE_ROUTINE:
             self.routine = RoutineController(self.state, self.cozmo.max_wheel_speed_mmps, self.cozmo.track_width_mm)
+            self.cube_search = None
             self.teleop_target_mm = None
             if speak:
                 play_speech_audio(SpeechCategory.NEW_COMMAND)
+        elif mode == self.MODE_CUBE_SEARCH:
+            try:
+                self.cube_search = MarkerSearchController(
+                    max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
+                    track_width_mm=self.cozmo.track_width_mm,
+                )
+            except RuntimeError as exc:
+                self.mode = self.MODE_IDLE
+                self.cube_search = None
+                self.cozmo.stop()
+                self.status_cube_search.set(f"cube search=error: {exc}")
+                return
+            self.routine = None
+            self.teleop_target_mm = None
+            self.cozmo.set_head_down()
+            if speak:
+                play_speech_audio(SpeechCategory.NEW_COMMAND)
         elif mode == self.MODE_IDLE:
+            self.routine = None
+            self.cube_search = None
             self.teleop_target_mm = None
             self.cozmo.stop()
             if speak:
                 play_speech_audio(SpeechCategory.IDLE_COMMENTS)
         elif speak:
+            self.routine = None
+            self.cube_search = None
             play_speech_audio(SpeechCategory.NEW_COMMAND)
 
     def _on_key_press(self, event):
@@ -476,6 +510,27 @@ class CozmoGui:
                 play_speech_audio(SpeechCategory.NEW_GOAL)
             elif self.routine.last_event == "returning_home":
                 play_speech_audio(SpeechCategory.RETURNING_HOME)
+            if cmd is not None:
+                self.cozmo.drive_wheels(cmd[0], cmd[1])
+            return
+
+        if self.mode == self.MODE_CUBE_SEARCH:
+            if self.cube_search is None:
+                try:
+                    self.cube_search = MarkerSearchController(
+                        max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
+                        track_width_mm=self.cozmo.track_width_mm,
+                    )
+                except RuntimeError as exc:
+                    self.status_cube_search.set(f"cube search=error: {exc}")
+                    self.set_mode(self.MODE_IDLE, speak=False)
+                    return
+            try:
+                cmd = self.cube_search.update(now_s, self.cozmo.latest_camera_image, self.state)
+            except RuntimeError as exc:
+                self.status_cube_search.set(f"cube search=error: {exc}")
+                self.set_mode(self.MODE_IDLE, speak=False)
+                return
             if cmd is not None:
                 self.cozmo.drive_wheels(cmd[0], cmd[1])
             return
@@ -619,6 +674,8 @@ class CozmoGui:
 
     def _draw_camera(self):
         image = self.cozmo.latest_camera_image
+        if self.mode == self.MODE_CUBE_SEARCH and self.cube_search is not None:
+            image = self.cube_search.annotated_image or image
         if image is None:
             if self.cozmo.test_mode:
                 self.camera_label.configure(text="Test mode: camera unavailable", image="")
@@ -701,6 +758,11 @@ class CozmoGui:
         else:
             self.status_target.set("target=none")
             self.status_routine.set("routine=inactive")
+
+        if self.mode == self.MODE_CUBE_SEARCH and self.cube_search is not None:
+            self.status_cube_search.set(self.cube_search.status_text)
+        elif not self.status_cube_search.get().startswith("cube search=error"):
+            self.status_cube_search.set("cube search=inactive")
 
         audio_state = get_audio_status()
         enabled = "on" if audio_state["enabled"] else "off"
