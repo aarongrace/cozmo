@@ -168,6 +168,33 @@ class CozmoInterface:
         self.cli.cancel_anim()
         return True, "audio stopped"
 
+    def get_lift_height_mm(self) -> float:
+        if self.cli is None:
+            return 0.0
+        return float(self.cli.lift_position.height.mm)
+
+    def set_head_level(self):
+        """Set head to horizontal (0 rad) for wandering."""
+        if self.cli is None:
+            return
+        if self.test_mode:
+            angle = max(self.TEST_MIN_HEAD_ANGLE_RAD, min(0.0, self.TEST_MAX_HEAD_ANGLE_RAD))
+            self.cli.set_head_angle(angle)
+            return
+        pycozmo = self._load_pycozmo()
+        angle = max(pycozmo.MIN_HEAD_ANGLE.radians, min(0.0, pycozmo.MAX_HEAD_ANGLE.radians))
+        self.cli.set_head_angle(angle)
+
+    def set_head_min(self):
+        """Set head to minimum angle for looking at a nearby cube."""
+        if self.cli is None:
+            return
+        if self.test_mode:
+            self.cli.set_head_angle(self.TEST_MIN_HEAD_ANGLE_RAD)
+            return
+        pycozmo = self._load_pycozmo()
+        self.cli.set_head_angle(pycozmo.MIN_HEAD_ANGLE.radians)
+
     def get_cliff_detected(self) -> bool:
         if self.cli is None or self.test_mode:
             return False

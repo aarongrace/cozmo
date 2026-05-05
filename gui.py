@@ -397,6 +397,9 @@ class CozmoGui:
                     on_lift_up=self.cozmo.set_lift_up,
                     on_lift_down=self.cozmo.set_lift_down,
                     get_cliff_detected=self.cozmo.get_cliff_detected,
+                    get_lift_height_mm=self.cozmo.get_lift_height_mm,
+                    on_head_level=self.cozmo.set_head_level,
+                    on_head_approach=self.cozmo.set_head_min,
                 )
             except RuntimeError as exc:
                 self.mode = self.MODE_IDLE
@@ -406,7 +409,6 @@ class CozmoGui:
                 return
             self.routine = None
             self.teleop_target_mm = None
-            self.cozmo.set_head_down()
             if speak:
                 play_speech_audio(SpeechCategory.NEW_COMMAND)
         elif mode == self.MODE_IDLE:

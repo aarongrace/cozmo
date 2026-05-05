@@ -29,10 +29,11 @@ MARKER_REAL_SIZE_MM = 20.0  # 2 cm AprilTag squares
 
 # True  → assume white ground (seed pixel must exceed WHITE_THRESHOLD in grey)
 # False → derive ground colour by averaging the bottom-centre 9×9 pixels each frame
-HARDCODE_GROUND_COLOR = True
+HARDCODE_GROUND_COLOR = False
 GROUND_COLOR_TOLERANCE = 35  # per-channel tolerance used in derived-colour mode
 
-_CLIFF_STATES = frozenset({"wandering", "centering", "approaching"})
+# States where cliff handling is active and ground detection matters
+_CLIFF_STATES = frozenset({"wandering", "centering", "approach_setup", "approaching"})
 
 
 @dataclass
@@ -219,6 +220,9 @@ class Cv2MarkerDetector:
 class MarkerSearchController:
     DETECTION_INTERVAL_S = 0.12
 
+    # Lift height threshold for "raised" check — max is 92 mm
+    LIFT_RAISED_THRESHOLD_MM = 80.0
+
     # Wandering
     WANDER_FORWARD_MMPS = 35.0
     WANDER_FORWARD_MAX_S = 1.5
@@ -237,9 +241,10 @@ class MarkerSearchController:
     APPROACH_TURN_GAIN = 10.0
     APPROACH_OVERSHOOT_MM = 35.0
 
-    # Lift timing
-    LIFT_LOWER_WAIT_S = 1.2
-    LIFT_RAISE_WAIT_S = 1.0
+    # Setup / teardown wait times
+    WANDER_SETUP_WAIT_S = 1.2   # time to raise lift + level camera before wandering
+    APPROACH_SETUP_WAIT_S = 1.2  # time to lower lift + tilt camera before approaching
+    POST_APPROACH_WAIT_S = 1.0   # time to raise lift after grabbing cube
 
     # Return home
     RETURN_STOP_MM = 28.0
@@ -256,6 +261,9 @@ class MarkerSearchController:
         on_lift_up: Optional[Callable] = None,
         on_lift_down: Optional[Callable] = None,
         get_cliff_detected: Optional[Callable] = None,
+        get_lift_height_mm: Optional[Callable] = None,
+        on_head_level: Optional[Callable] = None,
+        on_head_approach: Optional[Callable] = None,
     ):
         self.max_wheel_mmps = max_wheel_mmps
         self.track_width_mm = track_width_mm
@@ -264,9 +272,14 @@ class MarkerSearchController:
         self._on_lift_up = on_lift_up or (lambda: None)
         self._on_lift_down = on_lift_down or (lambda: None)
         self._get_cliff_detected = get_cliff_detected or (lambda: False)
+        self._get_lift_height_mm = get_lift_height_mm or (lambda: self.LIFT_RAISED_THRESHOLD_MM)
+        self._on_head_level = on_head_level or (lambda: None)
+        self._on_head_approach = on_head_approach or (lambda: None)
 
         self.detector = Cv2MarkerDetector()
-        self.state = "lowering_lift"
+
+        # State machine starts by raising the lift and levelling the camera
+        self.state = "wander_setup"
         self._state_start_s: Optional[float] = None
         self._action_done = False  # one-shot flag for per-state entry actions
 
@@ -306,31 +319,39 @@ class MarkerSearchController:
         self._cliff_turn_dir = None
 
         handlers = {
-            "lowering_lift": self._do_lower_lift,
-            "wandering":     self._do_wander,
-            "centering":     self._do_center,
-            "approaching":   self._do_approach,
-            "raising_lift":  self._do_raise_lift,
-            "returning":     self._do_return,
-            "finished":      self._do_finished,
+            "wander_setup":   self._do_wander_setup,
+            "wandering":      self._do_wander,
+            "centering":      self._do_center,
+            "approach_setup": self._do_approach_setup,
+            "approaching":    self._do_approach,
+            "post_approach":  self._do_post_approach,
+            "returning":      self._do_return,
+            "finished":       self._do_finished,
         }
         return handlers.get(self.state, lambda *_: (0.0, 0.0))(now_s, robot_state)
 
     # ----------------------------------------------------------------- states
 
-    def _do_lower_lift(self, now_s, _rs):
+    def _do_wander_setup(self, now_s, _rs):
         if not self._action_done:
-            self._on_lift_down()
+            self._on_lift_up()
+            self._on_head_level()
             self._action_done = True
         elapsed = now_s - self._state_start_s
-        self.status_text = f"cube search=lowering lift {elapsed:.1f}s"
-        if elapsed >= self.LIFT_LOWER_WAIT_S:
+        self.status_text = f"cube search=setup (lift+camera) {elapsed:.1f}s"
+        if elapsed >= self.WANDER_SETUP_WAIT_S:
             self._transition("wandering", now_s)
             self._wander_sub = "forward"
             self._wander_sub_start_s = now_s
         return (0.0, 0.0)
 
     def _do_wander(self, now_s, _rs):
+        # Safeguard: lift must be raised for valid ground detection
+        if self._get_lift_height_mm() < self.LIFT_RAISED_THRESHOLD_MM:
+            self._on_lift_up()
+            self.status_text = "cube search=wander: lift not raised, correcting"
+            return (0.0, 0.0)
+
         if self.last_detection is not None:
             self._transition("centering", now_s)
             self.status_text = f"cube search=found id={self.last_detection.marker_id}"
@@ -401,21 +422,34 @@ class MarkerSearchController:
             self.status_text = f"cube search=centering off={offset:.2f}"
             return (t, -t)
 
+        # Centered — record distance estimate then set up the approach
         dist_mm = det.estimated_distance_mm()
         self._approach_target_mm = dist_mm + self.APPROACH_OVERSHOOT_MM
         self._approach_start_xy = None
-        self._transition("approaching", now_s)
-        self.status_text = f"cube search=centered d={dist_mm:.0f}mm"
+        self._transition("approach_setup", now_s)
+        self.status_text = f"cube search=centered d={dist_mm:.0f}mm, preparing approach"
+        return (0.0, 0.0)
+
+    def _do_approach_setup(self, now_s, _rs):
+        if not self._action_done:
+            self._on_lift_down()
+            self._on_head_approach()
+            self._action_done = True
+        elapsed = now_s - self._state_start_s
+        self.status_text = f"cube search=approach setup (lower lift+camera) {elapsed:.1f}s"
+        if elapsed >= self.APPROACH_SETUP_WAIT_S:
+            self._transition("approaching", now_s)
         return (0.0, 0.0)
 
     def _do_approach(self, now_s, robot_state):
+        # No ground detection during approach — just drive to the cube
         if self._approach_start_xy is None:
             self._approach_start_xy = (robot_state.x_mm, robot_state.y_mm)
 
         driven = _dist2d(self._approach_start_xy, (robot_state.x_mm, robot_state.y_mm))
 
         if driven >= self._approach_target_mm:
-            self._transition("raising_lift", now_s)
+            self._transition("post_approach", now_s)
             self.status_text = "cube search=at target, raising lift"
             return (0.0, 0.0)
 
@@ -433,13 +467,13 @@ class MarkerSearchController:
         self.status_text = f"cube search=approaching rem={remaining:.0f}mm"
         return (left, right)
 
-    def _do_raise_lift(self, now_s, _rs):
+    def _do_post_approach(self, now_s, _rs):
         if not self._action_done:
             self._on_lift_up()
             self._action_done = True
         elapsed = now_s - self._state_start_s
         self.status_text = "cube search=raising lift"
-        if elapsed >= self.LIFT_RAISE_WAIT_S:
+        if elapsed >= self.POST_APPROACH_WAIT_S:
             self._transition("returning", now_s)
             self.status_text = "cube search=returning"
         return (0.0, 0.0)
