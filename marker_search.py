@@ -27,6 +27,13 @@ else:
 CAMERA_HFOV_DEG = 58.0
 MARKER_REAL_SIZE_MM = 20.0  # 2 cm AprilTag squares
 
+# True  → assume white ground (seed pixel must exceed WHITE_THRESHOLD in grey)
+# False → derive ground colour by averaging the bottom-centre 9×9 pixels each frame
+HARDCODE_GROUND_COLOR = True
+GROUND_COLOR_TOLERANCE = 35  # per-channel tolerance used in derived-colour mode
+
+_CLIFF_STATES = frozenset({"wandering", "centering", "approaching"})
+
 
 @dataclass
 class MarkerDetection:
@@ -128,13 +135,28 @@ class Cv2MarkerDetector:
 
     def _detect_ground(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         sx, sy = w // 2, h - 1
-        if int(gray[sy, sx]) < self.WHITE_THRESHOLD:
+        flags = cv2.FLOODFILL_MASK_ONLY | (255 << 8) | cv2.FLOODFILL_FIXED_RANGE
+
+        if HARDCODE_GROUND_COLOR:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            if int(gray[sy, sx]) < self.WHITE_THRESHOLD:
+                return None
+            flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+            cv2.floodFill(gray, flood_mask, (sx, sy), 255, loDiff=35, upDiff=35, flags=flags)
+            return flood_mask[1:-1, 1:-1]
+
+        # Derived colour: average the centre-bottom 9×9 patch in BGR
+        y1, y2 = max(0, sy - 4), min(h, sy + 5)
+        x1, x2 = max(0, sx - 4), min(w, sx + 5)
+        mean_bgr = frame_bgr[y1:y2, x1:x2].mean(axis=(0, 1)).astype(np.int32)
+        diff = np.abs(frame_bgr.astype(np.int32) - mean_bgr)
+        similar = (diff.max(axis=2) <= GROUND_COLOR_TOLERANCE).astype(np.uint8) * 255
+        if similar[sy, sx] == 0:
             return None
         flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-        flags = cv2.FLOODFILL_MASK_ONLY | (255 << 8) | cv2.FLOODFILL_FIXED_RANGE
-        cv2.floodFill(gray, flood_mask, (sx, sy), 255, loDiff=35, upDiff=35, flags=flags)
+        # similar is binary (0/255); loDiff=0 fills only connected 255-pixels
+        cv2.floodFill(similar, flood_mask, (sx, sy), 255, loDiff=0, upDiff=0, flags=flags)
         return flood_mask[1:-1, 1:-1]
 
     def _annotate(self, frame_bgr, corners, ids, detections, ground_mask):
@@ -260,6 +282,7 @@ class MarkerSearchController:
 
         self._approach_start_xy: Optional[tuple] = None
         self._approach_target_mm: float = 0.0
+        self._cliff_turn_dir: Optional[float] = None
 
     # ------------------------------------------------------------------ public
 
@@ -272,6 +295,15 @@ class MarkerSearchController:
             dets, self.annotated_image, mask = self.detector.detect(image, self.target_marker_id)
             self.last_detection = self._pick_best(dets)
             self._last_ground_mask = mask
+
+        # Cliff takes priority over all movement states — turn in place until clear
+        if self.state in _CLIFF_STATES and self._get_cliff_detected():
+            if self._cliff_turn_dir is None:
+                self._cliff_turn_dir = random.choice([-1.0, 1.0])
+            self.status_text = "cube search=cliff! turning clear"
+            t = self.WANDER_TURN_MMPS * self._cliff_turn_dir
+            return (t, -t)
+        self._cliff_turn_dir = None
 
         handlers = {
             "lowering_lift": self._do_lower_lift,
@@ -303,12 +335,6 @@ class MarkerSearchController:
             self._transition("centering", now_s)
             self.status_text = f"cube search=found id={self.last_detection.marker_id}"
             return (0.0, 0.0)
-
-        if self._get_cliff_detected():
-            self._wander_sub = "backing"
-            self._wander_sub_start_s = now_s
-            self.status_text = "cube search=cliff, backing"
-            return (-self.WANDER_BACK_MMPS, -self.WANDER_BACK_MMPS)
 
         if self._wander_sub_start_s is None:
             self._wander_sub_start_s = now_s
@@ -360,12 +386,6 @@ class MarkerSearchController:
         return (self.WANDER_FORWARD_MMPS, self.WANDER_FORWARD_MMPS)
 
     def _do_center(self, now_s, _rs):
-        if self._get_cliff_detected():
-            self._transition("wandering", now_s)
-            self._wander_sub = "backing"
-            self._wander_sub_start_s = now_s
-            return (-self.WANDER_BACK_MMPS, -self.WANDER_BACK_MMPS)
-
         det = self.last_detection
         if det is None:
             self._transition("wandering", now_s)
@@ -389,12 +409,6 @@ class MarkerSearchController:
         return (0.0, 0.0)
 
     def _do_approach(self, now_s, robot_state):
-        if self._get_cliff_detected():
-            self._transition("wandering", now_s)
-            self._wander_sub = "backing"
-            self._wander_sub_start_s = now_s
-            return (-self.WANDER_BACK_MMPS, -self.WANDER_BACK_MMPS)
-
         if self._approach_start_xy is None:
             self._approach_start_xy = (robot_state.x_mm, robot_state.y_mm)
 
