@@ -10,6 +10,7 @@ class CozmoInterface:
     TEST_TRACK_WIDTH_MM = 45.0
     TEST_MAX_HEAD_ANGLE_RAD = 0.7766715171374766
     TEST_MIN_HEAD_ANGLE_RAD = -0.4363323129985824
+    HEAD_ANGLE_STEP_RAD = 0.1
     TEST_MAX_LIFT_HEIGHT_MM = 92.0
     TEST_MIN_LIFT_HEIGHT_MM = 32.0
 
@@ -110,19 +111,19 @@ class CozmoInterface:
         if self.cli is None:
             return
         if self.test_mode:
-            self.cli.set_head_angle(self.TEST_MAX_HEAD_ANGLE_RAD)
+            self.cli.set_head_angle(min(self.cli.head_angle.radians + self.HEAD_ANGLE_STEP_RAD, self.TEST_MAX_HEAD_ANGLE_RAD))
             return
         pycozmo = self._load_pycozmo()
-        self.cli.set_head_angle(pycozmo.MAX_HEAD_ANGLE.radians)
+        self.cli.set_head_angle(min(self.cli.head_angle.radians + self.HEAD_ANGLE_STEP_RAD, pycozmo.MAX_HEAD_ANGLE.radians))
 
     def set_head_down(self):
         if self.cli is None:
             return
         if self.test_mode:
-            self.cli.set_head_angle(self.TEST_MIN_HEAD_ANGLE_RAD)
+            self.cli.set_head_angle(max(self.cli.head_angle.radians - self.HEAD_ANGLE_STEP_RAD, self.TEST_MIN_HEAD_ANGLE_RAD))
             return
         pycozmo = self._load_pycozmo()
-        self.cli.set_head_angle(pycozmo.MIN_HEAD_ANGLE.radians)
+        self.cli.set_head_angle(max(self.cli.head_angle.radians - self.HEAD_ANGLE_STEP_RAD, pycozmo.MIN_HEAD_ANGLE.radians))
 
     def set_lift_up(self):
         if self.cli is None:
