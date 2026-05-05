@@ -394,6 +394,9 @@ class CozmoGui:
                 self.cube_search = MarkerSearchController(
                     max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
                     track_width_mm=self.cozmo.track_width_mm,
+                    on_lift_up=self.cozmo.set_lift_up,
+                    on_lift_down=self.cozmo.set_lift_down,
+                    get_cliff_detected=self.cozmo.get_cliff_detected,
                 )
             except RuntimeError as exc:
                 self.mode = self.MODE_IDLE
@@ -520,6 +523,9 @@ class CozmoGui:
                     self.cube_search = MarkerSearchController(
                         max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
                         track_width_mm=self.cozmo.track_width_mm,
+                        on_lift_up=self.cozmo.set_lift_up,
+                        on_lift_down=self.cozmo.set_lift_down,
+                        get_cliff_detected=self.cozmo.get_cliff_detected,
                     )
                 except RuntimeError as exc:
                     self.status_cube_search.set(f"cube search=error: {exc}")

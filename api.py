@@ -168,6 +168,14 @@ class CozmoInterface:
         self.cli.cancel_anim()
         return True, "audio stopped"
 
+    def get_cliff_detected(self) -> bool:
+        if self.cli is None or self.test_mode:
+            return False
+        try:
+            return bool(self.cli.robot_status & 0x4000)  # RobotStatusFlag.CLIFF_DETECTED
+        except Exception:
+            return False
+
     def _on_camera_image(self, cli, image):
         del cli
         self.latest_camera_image = image
