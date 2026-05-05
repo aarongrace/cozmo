@@ -146,7 +146,9 @@ class Cv2MarkerDetector:
 
 
 class MarkerSearchController:
-    DETECTION_INTERVAL_S = 0.15
+    DETECTION_INTERVAL_S = 0.1
+    MEMORY_MATCH_RADIUS_FRAME_WIDTH_RATIO = 1.0 / 3.0
+    MAX_MISSED_DETECTION_PASSES = 1
     SEARCH_SPIN_MMPS = 20.0
     CENTER_TURN_MMPS = 14.0
     APPROACH_MMPS = 28.0
@@ -173,6 +175,7 @@ class MarkerSearchController:
         self.detector = Cv2MarkerDetector()
         self.state = "searching"
         self.last_detection: Optional[MarkerDetection] = None
+        self.missed_detection_passes = 0
         self.last_detection_time_s = 0.0
         self.aligned_since_s: Optional[float] = None
         self.last_error = None
@@ -204,7 +207,7 @@ class MarkerSearchController:
         if now_s - self.last_detection_time_s >= self.DETECTION_INTERVAL_S:
             self.last_detection_time_s = now_s
             detections, self.annotated_image = self.detector.detect(image, self.target_marker_id)
-            self.last_detection = self._select_detection(detections)
+            self.last_detection = self._update_detection_memory(detections)
 
         detection = self.last_detection
         if detection is None:
@@ -242,6 +245,32 @@ class MarkerSearchController:
         if not detections:
             return None
         return max(detections, key=lambda d: d.width_px * d.height_px)
+
+    def _update_detection_memory(self, detections):
+        if self.last_detection is None:
+            self.missed_detection_passes = 0
+            return self._select_detection(detections)
+
+        radius_px = self.last_detection.frame_width * self.MEMORY_MATCH_RADIUS_FRAME_WIDTH_RATIO
+        radius_sq = radius_px * radius_px
+        matches = [
+            detection
+            for detection in detections
+            if detection.marker_id == self.last_detection.marker_id
+            and (detection.center_x - self.last_detection.center_x) ** 2
+            + (detection.center_y - self.last_detection.center_y) ** 2
+            <= radius_sq
+        ]
+        if matches:
+            self.missed_detection_passes = 0
+            return self._select_detection(matches)
+
+        self.missed_detection_passes += 1
+        if self.missed_detection_passes <= self.MAX_MISSED_DETECTION_PASSES:
+            return self.last_detection
+
+        self.missed_detection_passes = 0
+        return self._select_detection(detections)
 
     def _handoff_wait_left(self, now_s: float) -> float:
         if self.aligned_since_s is None:
