@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import map_wander; print\\('map_wander OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('gui.py'\\).read\\(\\)\\); print\\('gui.py syntax OK'\\)\")"
+    ]
+  }
+}

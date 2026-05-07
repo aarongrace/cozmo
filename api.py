@@ -173,17 +173,21 @@ class CozmoInterface:
             return 0.0
         return float(self.cli.lift_position.height.mm)
 
-    def set_head_level(self):
-        """Set head to horizontal (0 rad) for wandering."""
+    def set_head_angle_abs(self, angle_rad: float):
+        """Set head to an absolute angle in radians, clamped to valid range."""
         if self.cli is None:
             return
         if self.test_mode:
-            angle = max(self.TEST_MIN_HEAD_ANGLE_RAD, min(0.0, self.TEST_MAX_HEAD_ANGLE_RAD))
-            self.cli.set_head_angle(angle)
+            clamped = max(self.TEST_MIN_HEAD_ANGLE_RAD, min(angle_rad, self.TEST_MAX_HEAD_ANGLE_RAD))
+            self.cli.set_head_angle(clamped)
             return
         pycozmo = self._load_pycozmo()
-        angle = max(pycozmo.MIN_HEAD_ANGLE.radians, min(0.0, pycozmo.MAX_HEAD_ANGLE.radians))
-        self.cli.set_head_angle(angle)
+        clamped = max(pycozmo.MIN_HEAD_ANGLE.radians, min(angle_rad, pycozmo.MAX_HEAD_ANGLE.radians))
+        self.cli.set_head_angle(clamped)
+
+    def set_head_level(self):
+        """Set head to horizontal (0 rad) for wandering."""
+        self.set_head_angle_abs(0.0)
 
     def set_head_min(self):
         """Set head to minimum angle for looking at a nearby cube."""

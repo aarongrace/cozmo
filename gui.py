@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 
 from api import CozmoInterface
 from helpers import *
+from map_wander import BOARD_WIDTH_MM, BOARD_HEIGHT_MM, MapWanderController
 from marker_search import MarkerSearchController
 from audio import (
     get_audio_status,
@@ -44,8 +45,11 @@ class CozmoGui:
     MODE_TELEOP = "teleop"
     MODE_ROUTINE = "routine"
     MODE_CUBE_SEARCH = "cube_search"
+    MODE_MAP_WANDER = "map_wander"
     MODE_IDLE = "idle"
-    MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_CUBE_SEARCH, MODE_IDLE)
+    MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_CUBE_SEARCH, MODE_MAP_WANDER, MODE_IDLE)
+
+    MAP_WANDER_MAP_FILE = "map.png"   # relative to data/ directory
 
     CANVAS_SIZE_PX = 500
 
@@ -57,6 +61,10 @@ class CozmoGui:
         self.mode = self.MODE_IDLE
         self.routine = None
         self.cube_search = None
+        self.map_wander = None
+
+        self._map_bg_photo = None    # cached PhotoImage of the board map PNG
+        self._map_bg_size_px = 0     # canvas size at which it was rendered
 
         self.last_tick_s = time.perf_counter()
         self.trajectory = []
@@ -78,6 +86,7 @@ class CozmoGui:
         self.status_target = tk.StringVar(value="target=none")
         self.status_routine = tk.StringVar(value="routine=inactive")
         self.status_cube_search = tk.StringVar(value="cube search=inactive")
+        self.status_map_wander = tk.StringVar(value="map wander=inactive")
         self.status_conn = tk.StringVar(value=self._connection_status_text())
         self.status_audio = tk.StringVar(value="audio: init")
 
@@ -107,7 +116,7 @@ class CozmoGui:
         self.root.bind("<KeyRelease>", self._on_key_release)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.set_mode(self.MODE_TELEOP, speak=False)
+        self.set_mode(self.MODE_MAP_WANDER, speak=False)
         self.root.after(self.UI_UPDATE_MS, self._tick)
 
     def _connection_status_text(self):
@@ -191,17 +200,20 @@ class CozmoGui:
         mode_buttons.columnconfigure(2, weight=1)
         mode_buttons.columnconfigure(3, weight=1)
         tk.Button(
-            mode_buttons, text="Teleop", command=lambda: self.set_mode(self.MODE_TELEOP), **button_style
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        tk.Button(
-            mode_buttons, text="Routine", command=lambda: self.set_mode(self.MODE_ROUTINE), **button_style
-        ).grid(row=0, column=1, sticky="ew", padx=2)
+            mode_buttons, text="Map Wander", command=lambda: self.set_mode(self.MODE_MAP_WANDER), **button_style
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 2))
         tk.Button(
             mode_buttons, text="Find Cube", command=lambda: self.set_mode(self.MODE_CUBE_SEARCH), **button_style
         ).grid(row=0, column=2, sticky="ew", padx=2)
         tk.Button(
             mode_buttons, text="Idle", command=lambda: self.set_mode(self.MODE_IDLE), **button_style
-        ).grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        ).grid(row=0, column=3, sticky="ew", padx=(2, 0))
+        tk.Button(
+            mode_buttons, text="Teleop", command=lambda: self.set_mode(self.MODE_TELEOP), **button_style
+        ).grid(row=1, column=0, sticky="ew", padx=(0, 2), pady=(2, 0))
+        tk.Button(
+            mode_buttons, text="Routine", command=lambda: self.set_mode(self.MODE_ROUTINE), **button_style
+        ).grid(row=1, column=1, columnspan=3, sticky="ew", padx=(2, 0), pady=(2, 0))
         row += 1
 
         ttk.Separator(side).grid(row=row, column=0, columnspan=2, sticky="ew", pady=6)
@@ -219,6 +231,10 @@ class CozmoGui:
         ttk.Label(side, textvariable=self.status_conn, font=("Segoe UI", 9)).grid(row=row, column=1, sticky="w")
         row += 1
         ttk.Label(side, textvariable=self.status_cube_search, font=("Segoe UI", 9)).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+        ttk.Label(side, textvariable=self.status_map_wander, font=("Segoe UI", 9)).grid(
             row=row, column=0, columnspan=2, sticky="w"
         )
         row += 1
@@ -383,9 +399,22 @@ class CozmoGui:
 
     def set_mode(self, mode: str, speak: bool = True):
         self.mode = mode
-        if mode == self.MODE_ROUTINE:
+        self.routine = None
+        self.cube_search = None
+        self.map_wander = None
+
+        if mode == self.MODE_MAP_WANDER:
+            map_path = str(self.data_dir / self.MAP_WANDER_MAP_FILE)
+            self.map_wander = MapWanderController(
+                map_path=map_path,
+                max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
+                track_width_mm=self.cozmo.track_width_mm,
+            )
+            self.teleop_target_mm = None
+            if speak:
+                play_speech_audio(SpeechCategory.NEW_COMMAND)
+        elif mode == self.MODE_ROUTINE:
             self.routine = RoutineController(self.state, self.cozmo.max_wheel_speed_mmps, self.cozmo.track_width_mm)
-            self.cube_search = None
             self.teleop_target_mm = None
             if speak:
                 play_speech_audio(SpeechCategory.NEW_COMMAND)
@@ -398,7 +427,7 @@ class CozmoGui:
                     on_lift_down=self.cozmo.set_lift_down,
                     get_cliff_detected=self.cozmo.get_cliff_detected,
                     get_lift_height_mm=self.cozmo.get_lift_height_mm,
-                    on_head_level=self.cozmo.set_head_level,
+                    on_head_level=lambda: self.cozmo.set_head_angle_abs(-0.3),
                     on_head_approach=self.cozmo.set_head_min,
                 )
             except RuntimeError as exc:
@@ -407,20 +436,15 @@ class CozmoGui:
                 self.cozmo.stop()
                 self.status_cube_search.set(f"cube search=error: {exc}")
                 return
-            self.routine = None
             self.teleop_target_mm = None
             if speak:
                 play_speech_audio(SpeechCategory.NEW_COMMAND)
         elif mode == self.MODE_IDLE:
-            self.routine = None
-            self.cube_search = None
             self.teleop_target_mm = None
             self.cozmo.stop()
             if speak:
                 play_speech_audio(SpeechCategory.IDLE_COMMENTS)
         elif speak:
-            self.routine = None
-            self.cube_search = None
             play_speech_audio(SpeechCategory.NEW_COMMAND)
 
     def _on_key_press(self, event):
@@ -505,6 +529,17 @@ class CozmoGui:
     def _run_mode(self, now_s):
         if self.mode == self.MODE_IDLE:
             self.cozmo.drive_wheels(0.0, 0.0)
+            return
+
+        if self.mode == self.MODE_MAP_WANDER:
+            if self.map_wander is None:
+                self.map_wander = MapWanderController(
+                    map_path=str(self.data_dir / self.MAP_WANDER_MAP_FILE),
+                    max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
+                    track_width_mm=self.cozmo.track_width_mm,
+                )
+            cmd = self.map_wander.update(now_s, self.state)
+            self.cozmo.drive_wheels(cmd[0], cmd[1])
             return
 
         if self.mode == self.MODE_ROUTINE:
@@ -619,11 +654,45 @@ class CozmoGui:
         right_mmps = max(-clamp, min(clamp, right_mmps))
         return left_mmps, right_mmps
 
+    def _board_to_canvas(self, bx_mm: float, by_mm: float):
+        """Board-frame mm → canvas pixel for map_wander display (y-down)."""
+        map_size_px, ox, oy = self._get_map_geometry()
+        scale = min(map_size_px / BOARD_WIDTH_MM, map_size_px / BOARD_HEIGHT_MM)
+        disp_w = BOARD_WIDTH_MM * scale
+        disp_h = BOARD_HEIGHT_MM * scale
+        x_off = ox + (map_size_px - disp_w) / 2.0
+        y_off = oy + (map_size_px - disp_h) / 2.0
+        return x_off + bx_mm * scale, y_off + by_mm * scale
+
+    def _refresh_map_bg(self, map_size_px: int) -> None:
+        """(Re)load and cache the map PNG scaled to current canvas size."""
+        if self._map_bg_size_px == map_size_px and self._map_bg_photo is not None:
+            return
+        map_path = self.data_dir / self.MAP_WANDER_MAP_FILE
+        if not map_path.exists():
+            self._map_bg_photo = None
+            return
+        try:
+            img = Image.open(map_path).convert("RGB")
+            scale = min(map_size_px / img.width, map_size_px / img.height)
+            new_w = max(1, int(img.width  * scale))
+            new_h = max(1, int(img.height * scale))
+            self._map_bg_photo = ImageTk.PhotoImage(
+                img.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
+            )
+            self._map_bg_size_px = map_size_px
+        except Exception:
+            self._map_bg_photo = None
+
     def _draw_map(self, now_s):
         self.canvas.delete("all")
 
         map_size_px, ox, oy = self._get_map_geometry()
         if map_size_px < 8:
+            return
+
+        if self.mode == self.MODE_MAP_WANDER:
+            self._draw_map_wander_canvas(now_s, map_size_px, ox, oy)
             return
 
         self.canvas.create_rectangle(ox + 2, oy + 2, ox + map_size_px - 2, oy + map_size_px - 2, outline="#2b2f3a")
@@ -654,6 +723,51 @@ class CozmoGui:
             self._draw_target_animation(now_s)
 
         rx, ry = self._world_to_canvas(self.state.x_mm, self.state.y_mm)
+        self._draw_robot_icon(rx, ry, self.state.theta_rad)
+
+    def _draw_map_wander_canvas(self, now_s, map_size_px, ox, oy):
+        """Full canvas drawing for map_wander mode: PNG + path + robot."""
+        self._refresh_map_bg(map_size_px)
+        scale = min(map_size_px / BOARD_WIDTH_MM, map_size_px / BOARD_HEIGHT_MM)
+        disp_w = BOARD_WIDTH_MM * scale
+        disp_h = BOARD_HEIGHT_MM * scale
+        x_off = ox + (map_size_px - disp_w) / 2.0
+        y_off = oy + (map_size_px - disp_h) / 2.0
+
+        if self._map_bg_photo is not None:
+            self.canvas.create_image(
+                int(x_off + disp_w / 2), int(y_off + disp_h / 2),
+                image=self._map_bg_photo, anchor="center",
+            )
+        else:
+            # No map file — draw a plain rectangle
+            self.canvas.create_rectangle(
+                x_off, y_off, x_off + disp_w, y_off + disp_h,
+                outline="#444", fill="#1a1a1a",
+            )
+
+        # Draw planned path waypoints
+        if self.map_wander is not None:
+            wps = self.map_wander.path_waypoints_state
+            if len(wps) >= 2:
+                pts = []
+                for sx, sy in wps:
+                    bx, by = MapWanderController.state_to_board(sx, sy)
+                    cx, cy = self._board_to_canvas(bx, by)
+                    pts.extend([cx, cy])
+                self.canvas.create_line(*pts, fill="#ff8c1a", width=1, dash=(3, 3))
+            # Current waypoint dot
+            if wps:
+                bx, by = MapWanderController.state_to_board(*wps[0])
+                tx, ty = self._board_to_canvas(bx, by)
+                r = self.TARGET_DOT_RADIUS_PX + 1
+                self.canvas.create_oval(tx - r, ty - r, tx + r, ty + r,
+                                        fill="#ff8c1a", outline="#ff8c1a")
+                self._draw_target_animation(now_s)
+
+        # Draw robot icon at board position
+        bx, by = MapWanderController.state_to_board(self.state.x_mm, self.state.y_mm)
+        rx, ry = self._board_to_canvas(bx, by)
         self._draw_robot_icon(rx, ry, self.state.theta_rad)
 
     def _draw_robot_icon(self, x, y, theta_rad):
@@ -732,6 +846,9 @@ class CozmoGui:
         self._target_anim_start_s = time.perf_counter()
 
     def _get_active_target_mm(self):
+        if self.mode == self.MODE_MAP_WANDER and self.map_wander is not None:
+            wp = self.map_wander.current_waypoint_state
+            return wp  # already in state frame; canvas uses same frame
         if self.mode == self.MODE_ROUTINE and self.routine is not None:
             return self.routine.goal_xy_mm
         if self.teleop_target_mm is not None:
@@ -771,6 +888,11 @@ class CozmoGui:
             self.status_cube_search.set(self.cube_search.status_text)
         elif not self.status_cube_search.get().startswith("cube search=error"):
             self.status_cube_search.set("cube search=inactive")
+
+        if self.mode == self.MODE_MAP_WANDER and self.map_wander is not None:
+            self.status_map_wander.set(self.map_wander.status_text)
+        else:
+            self.status_map_wander.set("map wander=inactive")
 
         audio_state = get_audio_status()
         enabled = "on" if audio_state["enabled"] else "off"

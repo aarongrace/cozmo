@@ -30,7 +30,11 @@ MARKER_REAL_SIZE_MM = 20.0  # 2 cm AprilTag squares
 # True  → assume white ground (seed pixel must exceed WHITE_THRESHOLD in grey)
 # False → derive ground colour by averaging the bottom-centre 9×9 pixels each frame
 HARDCODE_GROUND_COLOR = False
-GROUND_COLOR_TOLERANCE = 35  # per-channel tolerance used in derived-colour mode
+GROUND_COLOR_TOLERANCE = 55  # per-channel tolerance used in derived-colour mode
+GROUND_BRIGHTNESS_MIN = 40   # pixels darker than this are excluded from ground detection
+
+# ArUco marker roles: 0 = home base, all other IDs = cubes
+HOME_MARKER_ID = 0
 
 # States where cliff handling is active and ground detection matters
 _CLIFF_STATES = frozenset({"wandering", "centering", "approach_setup", "approaching"})
@@ -139,12 +143,19 @@ class Cv2MarkerDetector:
         sx, sy = w // 2, h - 1
         flags = cv2.FLOODFILL_MASK_ONLY | (255 << 8) | cv2.FLOODFILL_FIXED_RANGE
 
+        # Exclude pixels too dark to plausibly be the ground surface
+        bright_mask = frame_bgr.max(axis=2) >= GROUND_BRIGHTNESS_MIN
+        if not bright_mask[sy, sx]:
+            return None
+
         if HARDCODE_GROUND_COLOR:
             gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             if int(gray[sy, sx]) < self.WHITE_THRESHOLD:
                 return None
+            gray_bright = gray.copy()
+            gray_bright[~bright_mask] = 0
             flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-            cv2.floodFill(gray, flood_mask, (sx, sy), 255, loDiff=35, upDiff=35, flags=flags)
+            cv2.floodFill(gray_bright, flood_mask, (sx, sy), 255, loDiff=35, upDiff=35, flags=flags)
             return flood_mask[1:-1, 1:-1]
 
         # Derived colour: average the centre-bottom 9×9 patch in BGR
@@ -153,10 +164,10 @@ class Cv2MarkerDetector:
         mean_bgr = frame_bgr[y1:y2, x1:x2].mean(axis=(0, 1)).astype(np.int32)
         diff = np.abs(frame_bgr.astype(np.int32) - mean_bgr)
         similar = (diff.max(axis=2) <= GROUND_COLOR_TOLERANCE).astype(np.uint8) * 255
+        similar[~bright_mask] = 0
         if similar[sy, sx] == 0:
             return None
         flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-        # similar is binary (0/255); loDiff=0 fills only connected 255-pixels
         cv2.floodFill(similar, flood_mask, (sx, sy), 255, loDiff=0, upDiff=0, flags=flags)
         return flood_mask[1:-1, 1:-1]
 
@@ -216,12 +227,43 @@ class Cv2MarkerDetector:
             result.append(count / denom if denom > 0.0 else 0.0)
         return result
 
+    def ground_goal(self, ground_mask):
+        """
+        Analyse how far the detected ground extends and return a steering goal.
+
+        Returns (has_goal, x_ratio):
+          has_goal  – False means the robot should turn (blocked or ground too near)
+          x_ratio   – -1..1 left/right offset of the ground centroid in the upper half;
+                      0.0 when ground is centred or only in the 30-50 % band.
+
+        Decision rules (y=0 top, y=h bottom in image coords):
+          • No ground mask or seed pixel dark                → (False, 0)
+          • Ground confined to bottom 30 % of frame (y>0.7h) → (False, 0)  turn
+          • Ground reaches above 50 % (y<0.5h)              → (True, centroid_x) curve
+          • Ground in middle band 30-50 %                   → (True, 0)  go straight
+        """
+        if ground_mask is None:
+            return False, 0.0
+        h, w = ground_mask.shape
+        # Ground must escape the bottom 30 % of the frame
+        if not ground_mask[: int(h * 0.7), :].any():
+            return False, 0.0
+        # If ground reaches the upper half, steer toward its centroid
+        upper_half = ground_mask[: int(h * 0.5), :]
+        if upper_half.any():
+            xs = np.where(upper_half > 0)[1]
+            x_ratio = (float(xs.mean()) - w / 2.0) / max(1.0, w / 2.0)
+            return True, float(max(-1.0, min(1.0, x_ratio)))
+        # Ground in the middle band — go straight
+        return True, 0.0
+
 
 class MarkerSearchController:
     DETECTION_INTERVAL_S = 0.12
 
-    # Lift height threshold for "raised" check — max is 92 mm
-    LIFT_RAISED_THRESHOLD_MM = 80.0
+    # Lift height threshold for "raised" check — max is 92 mm, relaxed so minor
+    # positional error or sensor noise does not trap the robot in the safeguard
+    LIFT_RAISED_THRESHOLD_MM = 60.0
 
     # Wandering
     WANDER_FORWARD_MMPS = 35.0
@@ -235,6 +277,10 @@ class MarkerSearchController:
     # Centering — turn speed reduced 70% vs wandering
     CENTER_DEADBAND_RATIO = 0.16
     CENTER_TURN_MMPS = 6.6  # WANDER_TURN_MMPS * 0.30
+
+    # Ground-goal steering during wander and return
+    WANDER_GOAL_KP = 20.0        # differential correction per unit x_ratio
+    RETURN_OBSTACLE_BLEND = 0.4  # scale of ground-goal correction during return
 
     # Approach
     APPROACH_MMPS = 30.0
@@ -346,11 +392,9 @@ class MarkerSearchController:
         return (0.0, 0.0)
 
     def _do_wander(self, now_s, _rs):
-        # Safeguard: lift must be raised for valid ground detection
+        # Safeguard: reissue lift command if below threshold, but don't block movement
         if self._get_lift_height_mm() < self.LIFT_RAISED_THRESHOLD_MM:
             self._on_lift_up()
-            self.status_text = "cube search=wander: lift not raised, correcting"
-            return (0.0, 0.0)
 
         if self.last_detection is not None:
             self._transition("centering", now_s)
@@ -377,12 +421,14 @@ class MarkerSearchController:
                 self.status_text = f"cube search=wander turn {'L' if self._wander_turn_dir > 0 else 'R'}"
                 return (t, -t)
 
-        # forward sub-state — check ground ahead
-        clearance = self.detector.ground_clearance(self._last_ground_mask)
-        center = len(clearance) // 2
+        # Forward sub-state: use ground goal to curve toward clear ground
+        has_goal, x_ratio = self.detector.ground_goal(self._last_ground_mask)
 
-        if clearance[center] < self.GROUND_OBSTACLE_THRESH:
+        if not has_goal:
+            # Ground too near or blocked — pick best sector or back up
+            clearance = self.detector.ground_clearance(self._last_ground_mask)
             best = max(range(len(clearance)), key=lambda i: clearance[i])
+            center = len(clearance) // 2
             if clearance[best] < self.GROUND_OBSTACLE_THRESH:
                 self._wander_sub = "backing"
                 self._wander_sub_start_s = now_s
@@ -403,8 +449,13 @@ class MarkerSearchController:
             self.status_text = "cube search=wander random turn"
             return (t, -t)
 
-        self.status_text = f"cube search=wandering fwd c={clearance[center]:.2f}"
-        return (self.WANDER_FORWARD_MMPS, self.WANDER_FORWARD_MMPS)
+        # Curve toward the ground centroid
+        correction = self.WANDER_GOAL_KP * x_ratio
+        lim = self.max_wheel_mmps
+        left = max(-lim, min(lim, self.WANDER_FORWARD_MMPS - correction))
+        right = max(-lim, min(lim, self.WANDER_FORWARD_MMPS + correction))
+        self.status_text = f"cube search=wandering x={x_ratio:.2f}"
+        return (left, right)
 
     def _do_center(self, now_s, _rs):
         det = self.last_detection
@@ -484,9 +535,9 @@ class MarkerSearchController:
         if dist <= self.RETURN_STOP_MM:
             self._transition("finished", now_s)
             return (0.0, 0.0)
+
         omega_max = 0.6 * self.max_wheel_mmps * 2.0 / self.track_width_mm
-        self.status_text = f"cube search=returning d={dist:.0f}mm"
-        return calculate_wheel_speeds_for_point(
+        home_left, home_right = calculate_wheel_speeds_for_point(
             x_mm=robot_state.x_mm,
             y_mm=robot_state.y_mm,
             theta_rad=robot_state.theta_rad,
@@ -500,6 +551,19 @@ class MarkerSearchController:
             omega_max_radps=omega_max,
         )
 
+        # Blend ground-goal obstacle avoidance into the home-directed steering
+        has_goal, x_ratio = self.detector.ground_goal(self._last_ground_mask)
+        if has_goal and x_ratio != 0.0:
+            correction = self.WANDER_GOAL_KP * x_ratio * self.RETURN_OBSTACLE_BLEND
+            lim = self.max_wheel_mmps
+            home_left = max(-lim, min(lim, home_left - correction))
+            home_right = max(-lim, min(lim, home_right + correction))
+            self.status_text = f"cube search=returning d={dist:.0f}mm x={x_ratio:.2f}"
+        else:
+            self.status_text = f"cube search=returning d={dist:.0f}mm"
+
+        return (home_left, home_right)
+
     def _do_finished(self, _now_s, _rs):
         self.status_text = "cube search=finished"
         return (0.0, 0.0)
@@ -512,9 +576,11 @@ class MarkerSearchController:
         self._action_done = False
 
     def _pick_best(self, detections) -> Optional[MarkerDetection]:
-        if not detections:
+        # HOME_MARKER_ID marks the base; ignore it when hunting for cubes
+        candidates = [d for d in detections if d.marker_id != HOME_MARKER_ID]
+        if not candidates:
             return None
-        return max(detections, key=lambda d: d.width_px * d.height_px)
+        return max(candidates, key=lambda d: d.width_px * d.height_px)
 
 
 def _dist2d(a: tuple, b: tuple) -> float:
