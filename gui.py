@@ -81,6 +81,7 @@ class CozmoGui:
         self._configure_window_geometry()
 
         self.data_dir = Path(__file__).resolve().parent / "data"
+        self.project_dir = Path(__file__).resolve().parent
         self.robot_icon_path = self.data_dir / "robot_icon.png"
 
         self.status_mode = tk.StringVar(value=self.mode)
@@ -409,7 +410,7 @@ class CozmoGui:
         self.map_wander = None
 
         if mode == self.MODE_MAP_WANDER:
-            map_path = str(self.data_dir / self.MAP_WANDER_MAP_FILE)
+            map_path = str(self.project_dir / self.MAP_WANDER_MAP_FILE)
             self.map_wander = MapWanderController(
                 map_path=map_path,
                 max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
@@ -539,7 +540,7 @@ class CozmoGui:
         if self.mode == self.MODE_MAP_WANDER:
             if self.map_wander is None:
                 self.map_wander = MapWanderController(
-                    map_path=str(self.data_dir / self.MAP_WANDER_MAP_FILE),
+                    map_path=str(self.project_dir / self.MAP_WANDER_MAP_FILE),
                     max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
                     track_width_mm=self.cozmo.track_width_mm,
                 )
@@ -585,6 +586,9 @@ class CozmoGui:
                 self.status_cube_search.set(f"cube search=error: {exc}")
                 self.set_mode(self.MODE_IDLE, speak=False)
                 return
+            if self.cube_search.state == "finished":
+                print("[GUI] Cube delivered, restarting search for next cube")
+                self.cube_search = None   # recreate next tick → loops automatically
             if cmd is not None:
                 self.cozmo.drive_wheels(cmd[0], cmd[1])
             return
@@ -677,7 +681,7 @@ class CozmoGui:
 
     def _load_board_map_image(self) -> None:
         """Load map.png at startup for canvas display and red-dot start detection."""
-        map_path = self.data_dir / self.MAP_WANDER_MAP_FILE
+        map_path = self.project_dir / self.MAP_WANDER_MAP_FILE
         if not map_path.exists():
             print(f"[GUI] Map file not found: {map_path}")
             return
