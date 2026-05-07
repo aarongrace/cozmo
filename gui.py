@@ -49,7 +49,7 @@ class CozmoGui:
     MODE_IDLE = "idle"
     MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_CUBE_SEARCH, MODE_MAP_WANDER, MODE_IDLE)
 
-    MAP_WANDER_MAP_FILE = "map.svg"   # white=ground, black=obstacle, red dot=start
+    MAP_WANDER_MAP_FILE = "map.png"   # white=ground, black=obstacle, red dot=start
 
     CANVAS_SIZE_PX = 500
 

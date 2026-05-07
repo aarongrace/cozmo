@@ -2,13 +2,13 @@
 Map-based random wander controller.
 
 Physical space:  30 × 20 inches exactly (BOARD_WIDTH_MM × BOARD_HEIGHT_MM).
-Map file:        map.svg
+Map file:        map.png
   white pixels  → walkable ground
   black pixels  → obstacle
   red dot       → robot starting position (R≥235, G≤20, B≤20, pure red ±20)
 
-The SVG is rasterized and stretched to fill the 30×20 inch space exactly
-(MAP_RASTER_W × MAP_RASTER_H pixels, 1 px ≈ 1 mm).
+The PNG is stretched to fill the 30×20 inch space exactly regardless of its
+pixel dimensions.
 
 Coordinate frames
 -----------------
@@ -19,7 +19,6 @@ board_x = start_board_x + state_x
 board_y = start_board_y - state_y
 """
 
-import io
 import math
 import random
 from typing import Optional, Tuple
@@ -40,10 +39,6 @@ from helpers import RobotState, calculate_wheel_speeds_for_point
 MM_PER_INCH     = 25.4
 BOARD_WIDTH_MM  = 30.0 * MM_PER_INCH   # 762.0 mm
 BOARD_HEIGHT_MM = 20.0 * MM_PER_INCH   # 508.0 mm
-
-# ── Rasterisation (1 px ≈ 1 mm, stretched to board dims) ─────────────────────
-MAP_RASTER_W = 762
-MAP_RASTER_H = 508
 
 # ── Red-dot start-position detection ─────────────────────────────────────────
 RED_R_MIN = 235   # pure red: high R
@@ -68,32 +63,6 @@ KP_TURN            = 3.0
 ANGLE_DEADBAND_RAD = 0.05
 OMEGA_MAX_SCALE    = 0.6
 SPIN_MMPS          = 30.0
-
-
-def _rasterize_svg(path: str, w: int, h: int):
-    """Render an SVG to an RGB PIL Image stretched to (w × h) pixels."""
-    if PilImage is None:
-        return None
-    # cairosvg — most reliable
-    try:
-        import cairosvg
-        data = cairosvg.svg2png(url=str(path), output_width=w, output_height=h)
-        return PilImage.open(io.BytesIO(data)).convert("RGB")
-    except ImportError:
-        pass
-    # svglib fallback
-    try:
-        from svglib.svglib import svg2rlg
-        from reportlab.graphics import renderPM
-        drawing = svg2rlg(str(path))
-        if drawing is None:
-            return None
-        data = renderPM.drawToString(drawing, fmt="PNG")
-        img = PilImage.open(io.BytesIO(data)).convert("RGB")
-        return img.resize((w, h), PilImage.Resampling.LANCZOS)
-    except ImportError:
-        pass
-    return None
 
 
 class MapWanderController:
@@ -135,13 +104,13 @@ class MapWanderController:
     # ── map loading ───────────────────────────────────────────────────────────
 
     def _load_map(self, path: str) -> None:
-        if np is None:
-            self.status_text = "map wander=missing numpy"
+        if np is None or PilImage is None:
+            self.status_text = "map wander=missing numpy/Pillow"
             return
-
-        img = _rasterize_svg(path, MAP_RASTER_W, MAP_RASTER_H)
-        if img is None:
-            self.status_text = "map wander=SVG load failed (install cairosvg or svglib)"
+        try:
+            img = PilImage.open(path).convert("RGB")
+        except Exception as exc:
+            self.status_text = f"map wander=load error: {exc}"
             return
 
         arr = np.array(img, dtype=np.uint8)   # (H, W, 3) RGB
