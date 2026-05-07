@@ -759,6 +759,20 @@ class CozmoGui:
             outline="#333", width=2,
         )
 
+        # ── Inflated obstacle contours (orange) ──────────────────────────────
+        wander = self.map_wander
+        if wander is None and self.mode != self.MODE_MAP_WANDER:
+            # borrow a temporary controller just for contours if we have the map
+            pass  # only draw when map_wander is active
+        if wander is not None:
+            for poly_mm in wander.obstacle_contours_board_mm():
+                flat = []
+                for bx, by in poly_mm:
+                    cx_px, cy_px = self._board_to_canvas(bx, by)
+                    flat.extend([cx_px, cy_px])
+                if len(flat) >= 6:
+                    self.canvas.create_polygon(flat, outline="#ff8800", fill="", width=1)
+
         # ── Trajectory ────────────────────────────────────────────────────────
         for i in range(1, len(self.trajectory)):
             _, x0, y0 = self.trajectory[i - 1]

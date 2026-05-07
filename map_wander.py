@@ -77,8 +77,9 @@ class MapWanderController:
 
         self.map_w_px = 1
         self.map_h_px = 1
-        self._safe = None       # np.ndarray bool: True = safe pixel
-        self._raster_rgb = None  # np.ndarray (H,W,3) uint8 for GUI
+        self._safe = None              # np.ndarray bool: True = safe pixel
+        self._raster_rgb = None        # np.ndarray (H,W,3) uint8 for GUI
+        self._obstacle_contours = []   # cached list of board-mm polygons
 
         # Starting position in board frame (derived from red dot)
         self.start_bx_mm: float = 2.0 * MM_PER_INCH
@@ -141,6 +142,24 @@ class MapWanderController:
             self._safe = cv2.dilate((~free).astype(np.uint8), kernel) == 0
         except ImportError:
             self._safe = free.copy()
+
+        # Cache obstacle contours for GUI display
+        try:
+            import cv2
+            obstacle = (~self._safe).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(obstacle, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if len(cnt) < 3:
+                    continue
+                pts = []
+                for pt in cnt[:, 0, :]:
+                    bx = float(pt[0]) / self.map_w_px * BOARD_WIDTH_MM
+                    by = float(pt[1]) / self.map_h_px * BOARD_HEIGHT_MM
+                    pts.append((bx, by))
+                self._obstacle_contours.append(pts)
+            print(f"[MapWander] Obstacle contours cached: {len(self._obstacle_contours)}")
+        except Exception as exc:
+            print(f"[MapWander] Contour extraction failed: {exc}")
 
         free_pct = float(free.mean()) * 100.0
         print(f"[MapWander] Map loaded: {self.map_w_px}×{self.map_h_px} px")
@@ -299,29 +318,8 @@ class MapWanderController:
         return self.state_to_board(*self._goal_state)
 
     def obstacle_contours_board_mm(self):
-        """Return list of polygons (each a list of (bx_mm, by_mm)) for the
-        inflated obstacle boundary, suitable for drawing on the canvas."""
-        if self._safe is None or np is None:
-            return []
-        try:
-            import cv2
-            obstacle = (~self._safe).astype(np.uint8) * 255
-            contours, _ = cv2.findContours(obstacle, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            result = []
-            for cnt in contours:
-                if len(cnt) < 3:
-                    continue
-                pts = []
-                for pt in cnt[:, 0, :]:
-                    bx = float(pt[0]) / self.map_w_px * BOARD_WIDTH_MM
-                    by = float(pt[1]) / self.map_h_px * BOARD_HEIGHT_MM
-                    pts.append((bx, by))
-                result.append(pts)
-            print(f"[MapWander] obstacle_contours_board_mm: {len(result)} contours")
-            return result
-        except Exception as exc:
-            print(f"[MapWander] contour error: {exc}")
-            return []
+        """Return cached list of inflated obstacle polygons in board-frame mm."""
+        return self._obstacle_contours
 
     @property
     def raster_image_pil(self):
