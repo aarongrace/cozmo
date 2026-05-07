@@ -74,8 +74,8 @@ class MapWanderController:
         self.omega_max = OMEGA_MAX_SCALE * max_wheel_mmps * 2.0 / track_width_mm
         self.status_text = "map wander=loading"
 
-        self.map_w_px = MAP_RASTER_W
-        self.map_h_px = MAP_RASTER_H
+        self.map_w_px = 1
+        self.map_h_px = 1
         self._safe = None       # np.ndarray bool: True = safe pixel
         self._raster_rgb = None  # np.ndarray (H,W,3) uint8 for GUI
 
@@ -98,8 +98,9 @@ class MapWanderController:
         try:
             from marker_search import Cv2MarkerDetector
             self._detector = Cv2MarkerDetector()
-        except Exception:
-            pass
+            print("[MapWander] AprilTag detector initialised (will scan every update)")
+        except Exception as exc:
+            print(f"[MapWander] AprilTag detector unavailable: {exc}")
 
     # ── map loading ───────────────────────────────────────────────────────────
 
@@ -115,14 +116,16 @@ class MapWanderController:
 
         arr = np.array(img, dtype=np.uint8)   # (H, W, 3) RGB
         self._raster_rgb = arr
+        self.map_w_px = arr.shape[1]
+        self.map_h_px = arr.shape[0]
 
         # Detect start position: centroid of pure-red pixels
         r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
         red_mask = (r >= RED_R_MIN) & (g <= RED_G_MAX) & (b <= RED_B_MAX)
         if red_mask.any():
             ys, xs = np.where(red_mask)
-            self.start_bx_mm = float(xs.mean()) / MAP_RASTER_W * BOARD_WIDTH_MM
-            self.start_by_mm = float(ys.mean()) / MAP_RASTER_H * BOARD_HEIGHT_MM
+            self.start_bx_mm = float(xs.mean()) / self.map_w_px * BOARD_WIDTH_MM
+            self.start_by_mm = float(ys.mean()) / self.map_h_px * BOARD_HEIGHT_MM
 
         # Free map: white (all channels bright) or red start marker
         free = arr.max(axis=2) > 200
@@ -135,6 +138,15 @@ class MapWanderController:
             self._safe = cv2.dilate((~free).astype(np.uint8), kernel) == 0
         except ImportError:
             self._safe = free.copy()
+
+        free_pct = float(free.mean()) * 100.0
+        print(f"[MapWander] Map loaded: {self.map_w_px}×{self.map_h_px} px")
+        print(f"[MapWander] Start position: ({self.start_bx_mm:.1f}, {self.start_by_mm:.1f}) mm on board")
+        print(f"[MapWander] Free/walkable area: {free_pct:.1f}%")
+        if red_mask.any():
+            print(f"[MapWander] Red dot found: {int(red_mask.sum())} pixels averaged")
+        else:
+            print("[MapWander] No red dot found — using default start (2\", 2\")")
 
         self.status_text = (
             f"map wander=ready  start=({self.start_bx_mm:.0f}, {self.start_by_mm:.0f}) mm"
@@ -167,14 +179,16 @@ class MapWanderController:
     def _pick_goal(self, sx: float, sy: float) -> Optional[Tuple[float, float]]:
         """Return a random safe state-frame goal ≥ MIN_GOAL_DIST_MM away."""
         bx0, by0 = self.state_to_board(sx, sy)
-        for _ in range(MAX_GOAL_ATTEMPTS):
+        for attempt in range(MAX_GOAL_ATTEMPTS):
             bx = random.uniform(0.0, BOARD_WIDTH_MM)
             by = random.uniform(0.0, BOARD_HEIGHT_MM)
             if not self.is_safe_board(bx, by):
                 continue
             if math.hypot(bx - bx0, by - by0) < MIN_GOAL_DIST_MM:
                 continue
+            print(f"[MapWander] _pick_goal found after {attempt+1} attempts: ({bx:.0f}, {by:.0f}) mm")
             return self.board_to_state(bx, by)
+        print(f"[MapWander] _pick_goal FAILED after {MAX_GOAL_ATTEMPTS} attempts (too many obstacles near robot?)")
         return None
 
     # ── public API ────────────────────────────────────────────────────────────
@@ -193,13 +207,16 @@ class MapWanderController:
             try:
                 from marker_search import HOME_MARKER_ID
                 dets, _, _ = self._detector.detect(image, target_marker_id=None)
+                if dets:
+                    print(f"[MapWander] Detection scan: {len(dets)} marker(s) visible: {[d.marker_id for d in dets]}")
                 for det in dets:
                     if det.marker_id != HOME_MARKER_ID:
                         self.found_marker_id = det.marker_id
+                        print(f"[MapWander] *** AprilTag id={det.marker_id} spotted! Signalling GUI ***")
                         self.status_text = f"map wander=marker {det.marker_id} spotted!"
                         return (0.0, 0.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[MapWander] Detection error: {exc}")
 
         # Pick new goal if needed
         if self._goal_state is None and not self._spinning:
@@ -209,8 +226,10 @@ class MapWanderController:
                 self._last_progress_s = now_s
                 self._last_check_pos = (sx, sy)
                 bx, by = self.state_to_board(*g)
+                print(f"[MapWander] New goal: board=({bx:.0f}, {by:.0f}) mm  state=({g[0]:.0f}, {g[1]:.0f}) mm")
                 self.status_text = f"map wander=new goal ({bx:.0f}, {by:.0f}) mm"
             else:
+                print("[MapWander] Could not find a valid goal — starting spin")
                 self._spinning = True
                 self._spin_dir = random.choice([-1.0, 1.0])
 
@@ -222,6 +241,8 @@ class MapWanderController:
                 self._spinning = False
                 self._last_progress_s = now_s
                 self._last_check_pos = (sx, sy)
+                bx, by = self.state_to_board(*g)
+                print(f"[MapWander] Found goal while spinning: ({bx:.0f}, {by:.0f}) mm")
             else:
                 self.status_text = "map wander=searching (spin)"
                 t = SPIN_MMPS * self._spin_dir
@@ -231,6 +252,8 @@ class MapWanderController:
         dist = math.hypot(gx - sx, gy - sy)
 
         if dist <= GOAL_REACHED_MM:
+            bx_g, by_g = self.state_to_board(gx, gy)
+            print(f"[MapWander] Goal reached: ({bx_g:.0f}, {by_g:.0f}) mm  (drove {dist:.0f} mm to get close)")
             self._goal_state = None
             self.status_text = "map wander=reached, picking next goal"
             return (0.0, 0.0)
@@ -241,11 +264,15 @@ class MapWanderController:
             self._last_progress_s = now_s
             self._last_check_pos = (sx, sy)
             if progress < STUCK_PROGRESS_MM:
+                bx_g, by_g = self.state_to_board(gx, gy)
+                print(f"[MapWander] STUCK — only moved {progress:.0f} mm in {STUCK_TIMEOUT_S}s, was heading to ({bx_g:.0f}, {by_g:.0f}) mm")
                 self._goal_state = None
                 self._spin_dir = random.choice([-1.0, 1.0])
                 self._spinning = True
                 self.status_text = "map wander=stuck, new goal"
                 return (SPIN_MMPS * self._spin_dir, -SPIN_MMPS * self._spin_dir)
+            else:
+                print(f"[MapWander] Progress check OK: {progress:.0f} mm in last {STUCK_TIMEOUT_S}s")
 
         bx_g, by_g = self.state_to_board(gx, gy)
         self.status_text = f"map wander=→({bx_g:.0f}, {by_g:.0f}) mm  d={dist:.0f}"

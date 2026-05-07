@@ -65,6 +65,9 @@ class CozmoGui:
 
         self._map_bg_photo = None    # cached PhotoImage of the board map PNG
         self._map_bg_size_px = 0     # canvas size at which it was rendered
+        self._board_map_pil = None   # PIL image loaded at startup for display
+        self._board_start_bx_mm = 2.0 * 25.4   # mm from left — overridden by red dot
+        self._board_start_by_mm = 2.0 * 25.4   # mm from top  — overridden by red dot
 
         self.last_tick_s = time.perf_counter()
         self.trajectory = []
@@ -108,6 +111,7 @@ class CozmoGui:
         self._build_ui()
         self._load_audio_files()
         self._load_robot_icon()
+        self._load_board_map_image()
         init_audio_controller(self.cozmo.cli, data_dir=self.data_dir)
         set_speech_volume(self.audio_volume_var.get())
         self.cozmo.enable_camera_stream(color=True)
@@ -116,7 +120,7 @@ class CozmoGui:
         self.root.bind("<KeyRelease>", self._on_key_release)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.set_mode(self.MODE_MAP_WANDER, speak=False)
+        self.set_mode(self.MODE_IDLE, speak=False)
         self.root.after(self.UI_UPDATE_MS, self._tick)
 
     def _connection_status_text(self):
@@ -141,9 +145,9 @@ class CozmoGui:
             main,
             width=self.map_panel_size_px,
             height=self.map_panel_size_px,
-            bg="#0f1117",
+            bg="white",
             highlightthickness=1,
-            highlightbackground="#444",
+            highlightbackground="#888",
         )
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.canvas.bind("<Button-1>", self._on_map_click)
@@ -398,6 +402,7 @@ class CozmoGui:
         self.sidebar_canvas.itemconfigure(self.sidebar_window_id, width=event.width)
 
     def set_mode(self, mode: str, speak: bool = True):
+        print(f"[GUI] set_mode: {self.mode} → {mode}")
         self.mode = mode
         self.routine = None
         self.cube_search = None
@@ -542,6 +547,7 @@ class CozmoGui:
                 now_s, self.state, image=self.cozmo.latest_camera_image
             )
             if self.map_wander.found_marker_id is not None:
+                print(f"[GUI] AprilTag {self.map_wander.found_marker_id} detected during wander → switching to cube search")
                 self.set_mode(self.MODE_CUBE_SEARCH)
                 return
             self.cozmo.drive_wheels(cmd[0], cmd[1])
@@ -669,17 +675,45 @@ class CozmoGui:
         y_off = oy + (map_size_px - disp_h) / 2.0
         return x_off + bx_mm * scale, y_off + by_mm * scale
 
+    def _load_board_map_image(self) -> None:
+        """Load map.png at startup for canvas display and red-dot start detection."""
+        map_path = self.data_dir / self.MAP_WANDER_MAP_FILE
+        if not map_path.exists():
+            print(f"[GUI] Map file not found: {map_path}")
+            return
+        try:
+            import numpy as np
+            img = Image.open(map_path).convert("RGB")
+            self._board_map_pil = img
+            arr = np.array(img, dtype=np.uint8)
+            h, w = arr.shape[:2]
+            r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+            red_mask = (r >= 235) & (g <= 20) & (b <= 20)
+            if red_mask.any():
+                ys, xs = np.where(red_mask)
+                self._board_start_bx_mm = float(xs.mean()) / w * BOARD_WIDTH_MM
+                self._board_start_by_mm = float(ys.mean()) / h * BOARD_HEIGHT_MM
+                print(f"[GUI] Map loaded: {w}×{h}px  red-dot start=({self._board_start_bx_mm:.1f}, {self._board_start_by_mm:.1f}) mm")
+            else:
+                print(f"[GUI] Map loaded: {w}×{h}px  no red dot found, using default start ({self._board_start_bx_mm:.1f}, {self._board_start_by_mm:.1f}) mm")
+            free_pct = float((arr.max(axis=2) > 200).mean()) * 100.0
+            print(f"[GUI] Map free area: {free_pct:.1f}%")
+        except Exception as exc:
+            print(f"[GUI] Map load error: {exc}")
+
     def _refresh_map_bg(self, map_size_px: int) -> None:
-        """Cache the map raster image scaled to the current canvas size."""
+        """Cache the map raster scaled to current canvas size."""
         if self._map_bg_size_px == map_size_px and self._map_bg_photo is not None:
             return
-        if self.map_wander is None:
-            return
-        img = self.map_wander.raster_image_pil
+        # Prefer the active controller's image (it may have been processed differently)
+        img = None
+        if self.map_wander is not None:
+            img = self.map_wander.raster_image_pil
+        if img is None:
+            img = self._board_map_pil
         if img is None:
             self._map_bg_photo = None
             return
-        # Scale to fit correctly in the canvas (letterbox to preserve 30×20 ratio)
         scale = min(map_size_px / img.width, map_size_px / img.height)
         new_w = max(1, int(img.width  * scale))
         new_h = max(1, int(img.height * scale))
@@ -695,42 +729,7 @@ class CozmoGui:
         if map_size_px < 8:
             return
 
-        if self.mode == self.MODE_MAP_WANDER:
-            self._draw_map_wander_canvas(now_s, map_size_px, ox, oy)
-            return
-
-        self.canvas.create_rectangle(ox + 2, oy + 2, ox + map_size_px - 2, oy + map_size_px - 2, outline="#2b2f3a")
-        center_x = ox + map_size_px / 2
-        center_y = oy + map_size_px / 2
-        self.canvas.create_line(center_x, oy, center_x, oy + map_size_px, fill="#1f2530")
-        self.canvas.create_line(ox, center_y, ox + map_size_px, center_y, fill="#1f2530")
-
-        for i in range(1, len(self.trajectory)):
-            _, x0, y0 = self.trajectory[i - 1]
-            t1, x1, y1 = self.trajectory[i]
-            age = now_s - t1
-            alpha = max(0.0, 1.0 - age / self.TRAJECTORY_FADE_S)
-            color = self._fade_color(alpha)
-            c0 = self._world_to_canvas(x0, y0)
-            c1 = self._world_to_canvas(x1, y1)
-            self.canvas.create_line(c0[0], c0[1], c1[0], c1[1], fill=color, width=2)
-
-        active_target_mm = self._get_active_target_mm()
-        if active_target_mm is not None and not self._target_equal(active_target_mm, self._last_active_target_mm):
-            self._start_target_animation(active_target_mm)
-        self._last_active_target_mm = active_target_mm
-
-        if active_target_mm is not None:
-            tx, ty = self._world_to_canvas(*active_target_mm)
-            r = self.TARGET_DOT_RADIUS_PX
-            self.canvas.create_oval(tx - r, ty - r, tx + r, ty + r, fill="#ff8c1a", outline="#ff8c1a")
-            self._draw_target_animation(now_s)
-
-        rx, ry = self._world_to_canvas(self.state.x_mm, self.state.y_mm)
-        self._draw_robot_icon(rx, ry, self.state.theta_rad)
-
-    def _draw_map_wander_canvas(self, now_s, map_size_px, ox, oy):
-        """Full canvas drawing for map_wander mode: PNG + path + robot."""
+        # ── PNG obstacle map background (always shown) ───────────────────────
         self._refresh_map_bg(map_size_px)
         scale = min(map_size_px / BOARD_WIDTH_MM, map_size_px / BOARD_HEIGHT_MM)
         disp_w = BOARD_WIDTH_MM * scale
@@ -744,25 +743,43 @@ class CozmoGui:
                 image=self._map_bg_photo, anchor="center",
             )
         else:
-            # No map file — draw a plain rectangle
+            # No map file — draw a plain white board outline
             self.canvas.create_rectangle(
                 x_off, y_off, x_off + disp_w, y_off + disp_h,
-                outline="#444", fill="#1a1a1a",
+                fill="white", outline="#888",
             )
 
-        # Draw current goal
-        if self.map_wander is not None:
-            goal = self.map_wander.current_goal_board
-            if goal is not None:
-                tx, ty = self._board_to_canvas(goal[0], goal[1])
-                r = self.TARGET_DOT_RADIUS_PX + 1
-                self.canvas.create_oval(tx - r, ty - r, tx + r, ty + r,
-                                        fill="#ff8c1a", outline="#ff8c1a")
-                self._draw_target_animation(now_s)
+        # Board boundary
+        self.canvas.create_rectangle(
+            x_off, y_off, x_off + disp_w, y_off + disp_h,
+            outline="#333", width=2,
+        )
 
-        # Draw robot icon at board position
-        bx, by = self.map_wander.state_to_board(self.state.x_mm, self.state.y_mm)
-        rx, ry = self._board_to_canvas(bx, by)
+        # ── Trajectory ────────────────────────────────────────────────────────
+        for i in range(1, len(self.trajectory)):
+            _, x0, y0 = self.trajectory[i - 1]
+            t1, x1, y1 = self.trajectory[i]
+            age = now_s - t1
+            alpha = max(0.0, 1.0 - age / self.TRAJECTORY_FADE_S)
+            color = self._fade_color(alpha)
+            c0 = self._world_to_canvas(x0, y0)
+            c1 = self._world_to_canvas(x1, y1)
+            self.canvas.create_line(c0[0], c0[1], c1[0], c1[1], fill=color, width=2)
+
+        # ── Active target dot ─────────────────────────────────────────────────
+        active_target_mm = self._get_active_target_mm()
+        if active_target_mm is not None and not self._target_equal(active_target_mm, self._last_active_target_mm):
+            self._start_target_animation(active_target_mm)
+        self._last_active_target_mm = active_target_mm
+
+        if active_target_mm is not None:
+            tx, ty = self._world_to_canvas(*active_target_mm)
+            r = self.TARGET_DOT_RADIUS_PX
+            self.canvas.create_oval(tx - r, ty - r, tx + r, ty + r, fill="#ff8c1a", outline="#ff8c1a")
+            self._draw_target_animation(now_s)
+
+        # ── Robot icon ────────────────────────────────────────────────────────
+        rx, ry = self._world_to_canvas(self.state.x_mm, self.state.y_mm)
         self._draw_robot_icon(rx, ry, self.state.theta_rad)
 
     def _draw_robot_icon(self, x, y, theta_rad):
@@ -841,8 +858,10 @@ class CozmoGui:
         self._target_anim_start_s = time.perf_counter()
 
     def _get_active_target_mm(self):
-        if self.mode == self.MODE_MAP_WANDER:
-            return None  # goal drawn directly on board canvas
+        if self.mode == self.MODE_MAP_WANDER and self.map_wander is not None:
+            goal = self.map_wander.current_goal_board
+            if goal is not None:
+                return self.map_wander.board_to_state(*goal)
         if self.mode == self.MODE_ROUTINE and self.routine is not None:
             return self.routine.goal_xy_mm
         if self.teleop_target_mm is not None:
@@ -899,22 +918,22 @@ class CozmoGui:
             self.status_audio.set(f"audio: {enabled}, {muted}, vol={audio_state['volume']}, idle")
 
     def _world_to_canvas(self, x_mm: float, y_mm: float):
-        map_size_px, ox, oy = self._get_map_geometry()
-        if map_size_px <= 0:
-            return 0.0, 0.0
-        half = self.MAP_SIZE_MM / 2.0
-        px = ox + ((x_mm + half) / self.MAP_SIZE_MM) * map_size_px
-        py = oy + map_size_px - ((y_mm + half) / self.MAP_SIZE_MM) * map_size_px
-        return px, py
+        """State-frame mm → canvas pixel via board frame."""
+        bx = self._board_start_bx_mm + x_mm
+        by = self._board_start_by_mm - y_mm
+        return self._board_to_canvas(bx, by)
 
     def _canvas_to_world(self, x_px: float, y_px: float):
+        """Canvas pixel → state-frame mm via board frame."""
         map_size_px, ox, oy = self._get_map_geometry()
         if map_size_px <= 0:
             return 0.0, 0.0
-        half = self.MAP_SIZE_MM / 2.0
-        x_mm = ((x_px - ox) / map_size_px) * self.MAP_SIZE_MM - half
-        y_mm = (((oy + map_size_px) - y_px) / map_size_px) * self.MAP_SIZE_MM - half
-        return x_mm, y_mm
+        scale = min(map_size_px / BOARD_WIDTH_MM, map_size_px / BOARD_HEIGHT_MM)
+        x_off = ox + (map_size_px - BOARD_WIDTH_MM * scale) / 2.0
+        y_off = oy + (map_size_px - BOARD_HEIGHT_MM * scale) / 2.0
+        bx = (x_px - x_off) / scale
+        by = (y_px - y_off) / scale
+        return bx - self._board_start_bx_mm, self._board_start_by_mm - by
 
     def _get_map_geometry(self):
         width = max(1, self.canvas.winfo_width())
@@ -927,8 +946,9 @@ class CozmoGui:
     @staticmethod
     def _fade_color(alpha: float):
         alpha = max(0.0, min(1.0, alpha))
-        r0, g0, b0 = (80, 120, 255)
-        r1, g1, b1 = (15, 17, 23)
+        # dark blue → light grey on white background
+        r0, g0, b0 = (30, 80, 220)
+        r1, g1, b1 = (200, 200, 200)
         r = int(r1 + (r0 - r1) * alpha)
         g = int(g1 + (g0 - g1) * alpha)
         b = int(b1 + (b0 - b1) * alpha)
