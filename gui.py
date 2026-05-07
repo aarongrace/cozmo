@@ -49,7 +49,7 @@ class CozmoGui:
     MODE_IDLE = "idle"
     MODES = (MODE_TELEOP, MODE_ROUTINE, MODE_CUBE_SEARCH, MODE_MAP_WANDER, MODE_IDLE)
 
-    MAP_WANDER_MAP_FILE = "map.png"   # relative to data/ directory
+    MAP_WANDER_MAP_FILE = "map.svg"   # white=ground, black=obstacle, red dot=start
 
     CANVAS_SIZE_PX = 500
 
@@ -538,7 +538,12 @@ class CozmoGui:
                     max_wheel_mmps=self.cozmo.max_wheel_speed_mmps,
                     track_width_mm=self.cozmo.track_width_mm,
                 )
-            cmd = self.map_wander.update(now_s, self.state)
+            cmd = self.map_wander.update(
+                now_s, self.state, image=self.cozmo.latest_camera_image
+            )
+            if self.map_wander.found_marker_id is not None:
+                self.set_mode(self.MODE_CUBE_SEARCH)
+                return
             self.cozmo.drive_wheels(cmd[0], cmd[1])
             return
 
@@ -665,24 +670,23 @@ class CozmoGui:
         return x_off + bx_mm * scale, y_off + by_mm * scale
 
     def _refresh_map_bg(self, map_size_px: int) -> None:
-        """(Re)load and cache the map PNG scaled to current canvas size."""
+        """Cache the map raster image scaled to the current canvas size."""
         if self._map_bg_size_px == map_size_px and self._map_bg_photo is not None:
             return
-        map_path = self.data_dir / self.MAP_WANDER_MAP_FILE
-        if not map_path.exists():
+        if self.map_wander is None:
+            return
+        img = self.map_wander.raster_image_pil
+        if img is None:
             self._map_bg_photo = None
             return
-        try:
-            img = Image.open(map_path).convert("RGB")
-            scale = min(map_size_px / img.width, map_size_px / img.height)
-            new_w = max(1, int(img.width  * scale))
-            new_h = max(1, int(img.height * scale))
-            self._map_bg_photo = ImageTk.PhotoImage(
-                img.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
-            )
-            self._map_bg_size_px = map_size_px
-        except Exception:
-            self._map_bg_photo = None
+        # Scale to fit correctly in the canvas (letterbox to preserve 30×20 ratio)
+        scale = min(map_size_px / img.width, map_size_px / img.height)
+        new_w = max(1, int(img.width  * scale))
+        new_h = max(1, int(img.height * scale))
+        self._map_bg_photo = ImageTk.PhotoImage(
+            img.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
+        )
+        self._map_bg_size_px = map_size_px
 
     def _draw_map(self, now_s):
         self.canvas.delete("all")
@@ -746,27 +750,18 @@ class CozmoGui:
                 outline="#444", fill="#1a1a1a",
             )
 
-        # Draw planned path waypoints
+        # Draw current goal
         if self.map_wander is not None:
-            wps = self.map_wander.path_waypoints_state
-            if len(wps) >= 2:
-                pts = []
-                for sx, sy in wps:
-                    bx, by = MapWanderController.state_to_board(sx, sy)
-                    cx, cy = self._board_to_canvas(bx, by)
-                    pts.extend([cx, cy])
-                self.canvas.create_line(*pts, fill="#ff8c1a", width=1, dash=(3, 3))
-            # Current waypoint dot
-            if wps:
-                bx, by = MapWanderController.state_to_board(*wps[0])
-                tx, ty = self._board_to_canvas(bx, by)
+            goal = self.map_wander.current_goal_board
+            if goal is not None:
+                tx, ty = self._board_to_canvas(goal[0], goal[1])
                 r = self.TARGET_DOT_RADIUS_PX + 1
                 self.canvas.create_oval(tx - r, ty - r, tx + r, ty + r,
                                         fill="#ff8c1a", outline="#ff8c1a")
                 self._draw_target_animation(now_s)
 
         # Draw robot icon at board position
-        bx, by = MapWanderController.state_to_board(self.state.x_mm, self.state.y_mm)
+        bx, by = self.map_wander.state_to_board(self.state.x_mm, self.state.y_mm)
         rx, ry = self._board_to_canvas(bx, by)
         self._draw_robot_icon(rx, ry, self.state.theta_rad)
 
@@ -846,9 +841,8 @@ class CozmoGui:
         self._target_anim_start_s = time.perf_counter()
 
     def _get_active_target_mm(self):
-        if self.mode == self.MODE_MAP_WANDER and self.map_wander is not None:
-            wp = self.map_wander.current_waypoint_state
-            return wp  # already in state frame; canvas uses same frame
+        if self.mode == self.MODE_MAP_WANDER:
+            return None  # goal drawn directly on board canvas
         if self.mode == self.MODE_ROUTINE and self.routine is not None:
             return self.routine.goal_xy_mm
         if self.teleop_target_mm is not None:
