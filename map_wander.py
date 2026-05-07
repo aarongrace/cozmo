@@ -46,7 +46,8 @@ RED_G_MAX = 20    #           low G
 RED_B_MAX = 20    #           low B
 
 # ── Obstacle safety margin ────────────────────────────────────────────────────
-OBSTACLE_INFLATE_PX = 4
+OBSTACLE_CLEARANCE_MM = 60.0   # physical clearance around obstacles (robot ~80mm wide)
+BOARD_MARGIN_MM       = 60.0   # keep goals/robot this far from board edges
 
 # ── Goal selection ────────────────────────────────────────────────────────────
 MIN_GOAL_DIST_MM  = 150.0  # new goal must be at least this far from current pos
@@ -130,10 +131,12 @@ class MapWanderController:
         # Free map: white (all channels bright) or red start marker
         free = arr.max(axis=2) > 200
 
-        # Inflate obstacles for clearance
+        # Inflate obstacles for clearance — convert mm clearance to pixels
+        inflate_px = max(1, int(OBSTACLE_CLEARANCE_MM / BOARD_WIDTH_MM * self.map_w_px))
+        print(f"[MapWander] Obstacle inflation: {OBSTACLE_CLEARANCE_MM:.0f} mm → {inflate_px} px")
         try:
             import cv2
-            k = OBSTACLE_INFLATE_PX * 2 + 1
+            k = inflate_px * 2 + 1
             kernel = np.ones((k, k), np.uint8)
             self._safe = cv2.dilate((~free).astype(np.uint8), kernel) == 0
         except ImportError:
@@ -180,8 +183,8 @@ class MapWanderController:
         """Return a random safe state-frame goal ≥ MIN_GOAL_DIST_MM away."""
         bx0, by0 = self.state_to_board(sx, sy)
         for attempt in range(MAX_GOAL_ATTEMPTS):
-            bx = random.uniform(0.0, BOARD_WIDTH_MM)
-            by = random.uniform(0.0, BOARD_HEIGHT_MM)
+            bx = random.uniform(BOARD_MARGIN_MM, BOARD_WIDTH_MM - BOARD_MARGIN_MM)
+            by = random.uniform(BOARD_MARGIN_MM, BOARD_HEIGHT_MM - BOARD_MARGIN_MM)
             if not self.is_safe_board(bx, by):
                 continue
             if math.hypot(bx - bx0, by - by0) < MIN_GOAL_DIST_MM:
@@ -294,6 +297,31 @@ class MapWanderController:
         if self._goal_state is None:
             return None
         return self.state_to_board(*self._goal_state)
+
+    def obstacle_contours_board_mm(self):
+        """Return list of polygons (each a list of (bx_mm, by_mm)) for the
+        inflated obstacle boundary, suitable for drawing on the canvas."""
+        if self._safe is None or np is None:
+            return []
+        try:
+            import cv2
+            obstacle = (~self._safe).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(obstacle, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            result = []
+            for cnt in contours:
+                if len(cnt) < 3:
+                    continue
+                pts = []
+                for pt in cnt[:, 0, :]:
+                    bx = float(pt[0]) / self.map_w_px * BOARD_WIDTH_MM
+                    by = float(pt[1]) / self.map_h_px * BOARD_HEIGHT_MM
+                    pts.append((bx, by))
+                result.append(pts)
+            print(f"[MapWander] obstacle_contours_board_mm: {len(result)} contours")
+            return result
+        except Exception as exc:
+            print(f"[MapWander] contour error: {exc}")
+            return []
 
     @property
     def raster_image_pil(self):
